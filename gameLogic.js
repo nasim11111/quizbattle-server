@@ -1,97 +1,149 @@
-const QUESTION_TIME = 20;
-
-class GameRoom {
-  constructor(roomId, roomData, questions) {
-    this.roomId = roomId;
+// Contest = Tournament with 10 minute timer
+class Contest {
+  constructor(contestId, roomData) {
+    this.contestId = contestId;
     this.roomData = roomData;
-    this.questions = questions;
-    this.players = new Map();
-    this.currentQuestion = 0;
-    this.gameStarted = false;
-    this.tiebreakerMode = false;
+    this.players = new Map(); // uid -> { socketId, name, joinedAt, status, score, questions, currentQ, answers }
+    this.startTime = null;
+    this.endTime = null;
+    this.contestDuration = 10 * 60 * 1000; // 10 minutes
+    this.gameDuration = 200 * 1000; // 200 seconds per game (10 Q × 20s)
+    this.status = "waiting"; // waiting, active, ended
     this.timer = null;
-    this.answers = new Map();
-    this.scores = new Map();
-    this.answeredCount = 0;
   }
 
-  addPlayer(socketId, playerData) {
-    this.players.set(socketId, playerData);
-    this.scores.set(socketId, 0);
+  addPlayer(uid, socketId, playerData, questions) {
+    if (this.players.has(uid)) return false;
+    
+    this.players.set(uid, {
+      uid,
+      socketId,
+      name: playerData.name,
+      joinedAt: Date.now(),
+      status: "playing", // playing, finished, left
+      score: 0,
+      questions: questions,
+      currentQ: 0,
+      answers: new Map(),
+      gameStartTime: Date.now(),
+      gameEndTime: Date.now() + this.gameDuration
+    });
+    return true;
   }
 
-  removePlayer(socketId) {
-    this.players.delete(socketId);
-    this.scores.delete(socketId);
+  removePlayer(uid) {
+    const player = this.players.get(uid);
+    if (player) {
+      player.status = "left";
+    }
+  }
+
+  getPlayer(uid) {
+    return this.players.get(uid);
+  }
+
+  getPlayerBySocket(socketId) {
+    for (const [uid, player] of this.players) {
+      if (player.socketId === socketId) return player;
+    }
+    return null;
+  }
+
+  // Update socket ID if user reconnects with new socket
+  updateSocketId(uid, newSocketId) {
+    const player = this.players.get(uid);
+    if (player) {
+      player.socketId = newSocketId;
+    }
+  }
+
+  recordAnswer(uid, questionIndex, answerIndex) {
+    const player = this.players.get(uid);
+    if (!player) return false;
+    if (player.answers.has(questionIndex)) return false;
+
+    player.answers.set(questionIndex, answerIndex);
+    
+    // Check if answer is correct
+    const question = player.questions[questionIndex];
+    if (question && answerIndex === question.correct) {
+      player.score++;
+    }
+    
+    player.currentQ = questionIndex + 1;
+    
+    // Mark finished if completed all questions
+    if (player.currentQ >= player.questions.length) {
+      player.status = "finished";
+    }
+    
+    return true;
   }
 
   getPlayerCount() {
     return this.players.size;
   }
 
-  recordAnswer(socketId, answerIndex) {
-    if (this.answers.has(socketId)) return false;
-    this.answers.set(socketId, answerIndex);
-    this.answeredCount++;
-    return true;
-  }
-
-  allPlayersAnswered() {
-    return this.answeredCount >= this.players.size;
-  }
-
-  processAnswers() {
-    const currentQ = this.questions[this.currentQuestion];
-    const results = new Map();
-
-    this.players.forEach((player, socketId) => {
-      const answer = this.answers.get(socketId);
-      const isCorrect = answer === currentQ.correct;
-      if (isCorrect) {
-        this.scores.set(socketId, (this.scores.get(socketId) || 0) + 1);
-      }
-      results.set(socketId, {
-        answer: answer !== undefined ? answer : -1,
-        correct: isCorrect,
-        score: this.scores.get(socketId) || 0
-      });
+  getActivePlayerCount() {
+    let count = 0;
+    this.players.forEach(p => {
+      if (p.status !== "left") count++;
     });
-
-    return results;
+    return count;
   }
 
-  getScores() {
-    const scoreList = [];
-    this.players.forEach((player, socketId) => {
-      scoreList.push({
-        socketId,
+  start() {
+    this.status = "active";
+    this.startTime = Date.now();
+    this.endTime = this.startTime + this.contestDuration;
+  }
+
+  end() {
+    this.status = "ended";
+  }
+
+  // Check if new players can still join
+  canJoin() {
+    if (this.status === "waiting") return true;
+    if (this.status === "ended") return false;
+    
+    const now = Date.now();
+    const timeLeft = this.endTime - now;
+    // Need at least 200 seconds (game duration) left to join
+    return timeLeft >= this.gameDuration;
+  }
+
+  getTimeLeft() {
+    if (this.status !== "active") return null;
+    const left = this.endTime - Date.now();
+    return Math.max(0, left);
+  }
+
+  getFinalScores() {
+    const scores = [];
+    this.players.forEach((player, uid) => {
+      scores.push({
+        uid,
+        socketId: player.socketId,
         name: player.name,
-        score: this.scores.get(socketId) || 0
+        score: player.score,
+        status: player.status,
+        questionsAnswered: player.answers.size
       });
     });
-    return scoreList.sort((a, b) => b.score - a.score);
+    return scores.sort((a, b) => b.score - a.score);
+  }
+
+  getLiveLeaderboard() {
+    return this.getFinalScores();
   }
 
   findWinners() {
-    const scores = this.getScores();
+    const scores = this.getFinalScores();
     if (scores.length === 0) return [];
     const topScore = scores[0].score;
     return scores.filter(p => p.score === topScore);
   }
-
-  nextQuestion() {
-    this.currentQuestion++;
-    this.answers = new Map();
-    this.answeredCount = 0;
-  }
-
-  hasMoreQuestions() {
-    return this.currentQuestion < this.questions.length - 1;
-  }
-
-  getCurrentQuestion() {
-    return this.questions[this.currentQuestion];
-  }
 }
 
-module.exports = GameRoom;
+module.exports = Contest;
