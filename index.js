@@ -81,8 +81,10 @@ async function fetchRandomQuestions(playerUid, count = 10) {
     let easyUnseen = easyAll.filter(q => !seenQuestionIds.has(q.id));
     let hardUnseen = hardAll.filter(q => !seenQuestionIds.has(q.id));
 
-    if (easyUnseen.length < 7) easyUnseen = easyAll;
-    if (hardUnseen.length < 3) hardUnseen = hardAll;
+    if (easyUnseen.length < 7 || hardUnseen.length < 3) {
+      console.log(`⚠️ Not enough unseen for ${playerUid}`);
+      return [];
+    }
 
     const easy7 = easyUnseen.sort(() => Math.random() - 0.5).slice(0, 7);
     const hard3 = hardUnseen.sort(() => Math.random() - 0.5).slice(0, 3);
@@ -445,6 +447,38 @@ io.on("connection", (socket) => {
   socket.on("joinPractice", async (data) => {
     const { roomType, roomData, playerData } = data;
     console.log(`👤 ${playerData.name} joining PRACTICE`);
+    // Check if user has enough unseen questions
+    try {
+      const easySnap = await getDocs(
+        query(collection(db, "questions"), where("difficulty", "==", "easy"))
+      );
+      const hardSnap = await getDocs(
+        query(collection(db, "questions"), where("difficulty", "==", "hard"))
+      );
+      
+      const seenIds = new Set();
+      const userDoc = await getDocs(
+        query(collection(db, "userQuestionHistory"), where("userId", "==", playerData.uid))
+      );
+      userDoc.docs.forEach(d => {
+        const data = d.data();
+        if (data.questionIds) data.questionIds.forEach(id => seenIds.add(id));
+      });
+      
+      let unseenEasy = 0, unseenHard = 0;
+      easySnap.docs.forEach(d => { if (!seenIds.has(d.id)) unseenEasy++; });
+      hardSnap.docs.forEach(d => { if (!seenIds.has(d.id)) unseenHard++; });
+      
+      if (unseenEasy < 7 || unseenHard < 3) {
+        io.to(socket.id).emit("noQuestions", {
+          message: "🎉 You've played all questions! Wait for new ones.",
+          unseenTotal: unseenEasy + unseenHard
+        });
+        return;
+      }
+    } catch (e) {
+      console.log("Error checking questions:", e);
+    }
 
     if (!practiceRooms.has(roomType)) practiceRooms.set(roomType, []);
     const waiting = practiceRooms.get(roomType);
@@ -482,6 +516,38 @@ io.on("connection", (socket) => {
   socket.on("joinContest", async (data) => {
     const { roomType, roomData, playerData } = data;
     console.log(`🏁 ${playerData.name} joining CONTEST ${roomType}`);
+    // Check if user has enough unseen questions
+    try {
+      const easySnap = await getDocs(
+        query(collection(db, "questions"), where("difficulty", "==", "easy"))
+      );
+      const hardSnap = await getDocs(
+        query(collection(db, "questions"), where("difficulty", "==", "hard"))
+      );
+      
+      const seenIds = new Set();
+      const userDoc = await getDocs(
+        query(collection(db, "userQuestionHistory"), where("userId", "==", playerData.uid))
+      );
+      userDoc.docs.forEach(d => {
+        const data = d.data();
+        if (data.questionIds) data.questionIds.forEach(id => seenIds.add(id));
+      });
+      
+      let unseenEasy = 0, unseenHard = 0;
+      easySnap.docs.forEach(d => { if (!seenIds.has(d.id)) unseenEasy++; });
+      hardSnap.docs.forEach(d => { if (!seenIds.has(d.id)) unseenHard++; });
+      
+      if (unseenEasy < 7 || unseenHard < 3) {
+        io.to(socket.id).emit("noQuestions", {
+          message: "🎉 You've played all questions! Wait for new ones.",
+          unseenTotal: unseenEasy + unseenHard
+        });
+        return;
+      }
+    } catch (e) {
+      console.log("Error checking questions:", e);
+    }
 
     // Check if already in active contest
     for (const [contestId, contest] of activeContests) {
@@ -729,6 +795,66 @@ io.on("connection", (socket) => {
     // Note: For contests, we DON'T remove player on disconnect
     // They can reconnect using their UID
   });
+});
+
+// ========== Check if user has enough unseen questions ==========
+app.get("/checkQuestions/:uid", async (req, res) => {
+  try {
+    const { uid } = req.params;
+    
+    // Get all easy + hard
+    const easySnap = await getDocs(
+      query(collection(db, "questions"), where("difficulty", "==", "easy"))
+    );
+    const hardSnap = await getDocs(
+      query(collection(db, "questions"), where("difficulty", "==", "hard"))
+    );
+    
+    const totalEasy = easySnap.size;
+    const totalHard = hardSnap.size;
+    const totalQuestions = totalEasy + totalHard;
+    
+    // Get user's seen
+    const seenQuestionIds = new Set();
+    const userDoc = await getDocs(
+      query(collection(db, "userQuestionHistory"), where("userId", "==", uid))
+    );
+    userDoc.docs.forEach(d => {
+      const data = d.data();
+      if (data.questionIds) {
+        data.questionIds.forEach(id => seenQuestionIds.add(id));
+      }
+    });
+    
+    // Count unseen
+    let unseenEasy = 0;
+    let unseenHard = 0;
+    
+    easySnap.docs.forEach(d => {
+      if (!seenQuestionIds.has(d.id)) unseenEasy++;
+    });
+    hardSnap.docs.forEach(d => {
+      if (!seenQuestionIds.has(d.id)) unseenHard++;
+    });
+    
+    const unseenTotal = unseenEasy + unseenHard;
+    const canPlay = unseenEasy >= 7 && unseenHard >= 3;
+    
+    res.json({
+      totalQuestions,
+      totalEasy,
+      totalHard,
+      seenCount: seenQuestionIds.size,
+      unseenTotal,
+      unseenEasy,
+      unseenHard,
+      canPlay,
+      gamesLeft: Math.floor(unseenTotal / 10)
+    });
+  } catch (e) {
+    console.log("Error checking questions:", e);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.get("/", (req, res) => {
