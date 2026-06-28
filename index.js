@@ -1,3 +1,4 @@
+const { GoogleAuth } = require("google-auth-library");
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -767,20 +768,65 @@ app.get("/checkQuestions/:uid", async (req, res) => {
 // Helper to send push notification via Expo
 async function sendPushNotification(token, title, body) {
   try {
-    await fetch("https://exp.host/--/api/v2/push/send", {
-      method: "POST",
-      headers: {
-        "Accept": "application/json",
-        "Content-Type": "application/json"
+    // Use FCM V1 directly with service account
+    const auth = new GoogleAuth({
+      credentials: {
+        client_email: "firebase-adminsdk-fbsvc@quizbattle000000.iam.gserviceaccount.com",
+        private_key: "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCfZVDRU5L0V3eu\nnKu+lmZI3mSC3W1c/AQ2V2E6Ak6cssE4l5N9QGPayjLoqoRNE8lbssCI1qOUw52b\n+c5/wZjg59RfuYkXnXSJ9zt0vke5yg38FW+eatiEBbqbHOARd0/3ET/j4HG1jIa5\n7klW4Emc95VUGkTX7KRu/0TnL0CDe/mAFWsedrsR5YErV2rQRE302G5IduKwu3if\nB6Os+t+B+IG+8wmcMsCe4LL6/O7z3+l5trO0/StKlBWvewO404Eu3ibOG47boXAA\n+w3h4ZEQVBnyENS3romAPCoQrAbG511dlxl/mDDCsj7iXzYkgH4Ppz5njRbsRvUo\nF/h/RFw3AgMBAAECgf95abMlv4Mwm2+OkchAZE+FMeFdzUyAh3at7eEhTqCSu5Zy\nhQLTZTiqb1pX34rnKys1rfL6SIRRzK9BIAcrSUwqBGzAfZLvagBbFvcy9b2sxzvf\nyHQ9NyW1aqe5f0UuCLPgfkMsUMpMf74f4mH6yt1Hs08LwPavgpG9+rOBZXy+qXxw\nOu2bh38bVmSInXgDzN70AAwFsCZQpL353WsUm/bs+fi/16r7i8CGMn9lbUjaF9ID\npL0AZ1FEYO0/b2BYlWtCz1z0lJD3vQYfbxYyZbjn3+6kn8TGz2DkwMFrRTgTHTFe\nYowKcwsnNhXURiV3YlH+rmT/F3Vkl3uzKOxxJukCgYEA0ZeCo+akwYFfN5+Z2DGV\noBSn7ErTJbQlojDpmX4MuHeHR8AglOt3h69q18Mi62hldGj9i3pbMPxP0RoOVz/Q\nKv2oCCh3At2BX4u1+EAGwRVmacU5raS7lwK/f5Vgb5ke8HfZmtuEb4jJN0zwQQYi\n8tY1un/rsRmVquS3giLkN0MCgYEAwrB+msuRgpNePzZlnEufE0liZRROLeKZs3vC\n7/+h8yN2nNEeDTULpx7J2SBR5kv3mv8MMJJny3n9HwCZzZSifxf3mQwd9Ex+mSx2\nsleziLCgccr2HqvKC9Kl0vQKbLcxGY5V5Htiacn8aK3nxOKXlorWF10lZS/WNjAn\nMU3V1f0CgYBvQsTBCSEQ8AKB3qGmmLvbHNv/ncD01OrdbKW1K6rJCfqwZhdltpHf\nX4mSPC5/VQ32e/2MW0mpeWdNk01ll6SEDd9zZTe4N6oD9ICG5kYvnZKeN2pk+Xvz\nsCvEKKHm3BwGfzju8fUd2DkouBkaC43l5zziYiHWA8Tl0UBxPuBzTQKBgQCYvxR1\nqmVdhvWYrrsF5ybFYPv7xfSYd4KTmPQWi/+p3RcAbekf/5BG7Bb9bSgUgWGgj54m\ntZcNw4XePwBslMLw6ALwZttRgnqI/qOZxMks4zbeUJjM84cvw3MqkSFkrk2teUjW\nXB+YVErebiK7C/RWvlK+PexK+T8dgKYfPqwYmQKBgQCpiWGSLwjCxSfLTynT2X2j\nIxLyxEYehdz/hsvL55FpZZi8PlgIuWNOiQLh6y/PaksnmR2SBqC7nsFOXNQ1Gixm\nZP2By+hIuA3E9NcXLflf4tIhWN05aYcX/ixkR5oeDWs9f2hrjnzMTN+5oQRV93S6\nGhpC3yVsi0cQ58TwBqsOcQ==\n-----END PRIVATE KEY-----\n"
       },
-      body: JSON.stringify({
-        to: token,
-        title,
-        body,
-        sound: "default",
-        priority: "high"
-      })
+      scopes: ["https://www.googleapis.com/auth/firebase.messaging"]
     });
+
+    const accessToken = await auth.getAccessToken();
+
+    // Check if it's an Expo token or FCM token
+    if (token.startsWith("ExponentPushToken")) {
+      // Use Expo Push API
+      const response = await fetch("https://exp.host/--/api/v2/push/send", {
+        method: "POST",
+        headers: {
+          "Accept": "application/json",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          to: token,
+          title,
+          body,
+          sound: "default",
+          priority: "high",
+          channelId: "default"
+        })
+      });
+      const result = await response.json();
+      console.log("Expo push result:", JSON.stringify(result));
+    } else {
+      // Use FCM V1 directly
+      const response = await fetch(
+        `https://fcm.googleapis.com/v1/projects/quizbattle000000/messages:send`,
+        {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${accessToken}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            message: {
+              token,
+              notification: { title, body },
+              android: {
+                priority: "high",
+                notification: {
+                  sound: "default",
+                  channelId: "default"
+                }
+              }
+            }
+          })
+        }
+      );
+      const result = await response.json();
+      console.log("FCM V1 result:", JSON.stringify(result));
+    }
   } catch (e) {
     console.log("Push error:", e.message);
   }
@@ -833,7 +879,10 @@ app.post("/notifyNewQuestions", async (req, res) => {
     res.json({ success: true, notified, pushed });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
+// Get server time (prevents user from cheating with phone time)
+app.get("/serverTime", (req, res) => {
+  res.json({ time: Date.now() });
+});
 app.get("/", (req, res) => {
   res.json({
     status: "QuizBattle Tournament Server 🏆",
