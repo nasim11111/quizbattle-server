@@ -411,18 +411,36 @@ async function startPracticeGame(players, roomData) {
 function sendPracticeQuestion(gameId) {
   const game = practiceGames.get(gameId);
   if (!game) return;
+  
+  // Reset answered tracking for new question
+  game.answers = new Map();
+  game.answeredCount = 0;
+  game.questionProcessed = false;
+  
   const q = game.questions[game.currentQuestion];
+  const sendTime = Date.now();
+  
   io.to(gameId).emit("newQuestion", {
     questionIndex: game.currentQuestion, totalQuestions: game.questions.length,
     question: q.question, options: q.options, category: q.category,
-    difficulty: q.difficulty, timeLimit: 20
+    difficulty: q.difficulty, timeLimit: 20,
+    serverTime: sendTime
   });
-  game.timer = setTimeout(() => processPracticeQuestionEnd(gameId), 20000);
+  
+  // Server is the authority on timing - 22 seconds (2 extra buffer)
+  game.timer = setTimeout(() => processPracticeQuestionEnd(gameId), 22000);
 }
 
 function processPracticeQuestionEnd(gameId) {
   const game = practiceGames.get(gameId);
   if (!game) return;
+  
+  // Prevent double processing
+  if (game.questionProcessed) return;
+  game.questionProcessed = true;
+  
+  clearTimeout(game.timer);
+  
   const currentQ = game.questions[game.currentQuestion];
   const results = {};
 
@@ -643,14 +661,17 @@ io.on("connection", (socket) => {
     socket.leave(`contest_waiting_${roomType}`);
   });
 
-  socket.on("submitAnswer", (data) => {
+    socket.on("submitAnswer", (data) => {
     const { gameId, answerIndex } = data;
     const game = practiceGames.get(gameId);
     if (!game) return;
     if (game.answers.has(socket.id)) return;
+    if (game.questionProcessed) return;
     game.answers.set(socket.id, answerIndex);
     game.answeredCount++;
-    if (game.answeredCount >= game.players.size) { clearTimeout(game.timer); processPracticeQuestionEnd(gameId); }
+    if (game.answeredCount >= game.players.size) {
+      processPracticeQuestionEnd(gameId);
+    }
   });
 
   socket.on("submitContestAnswer", (data) => {
@@ -743,6 +764,28 @@ app.get("/checkQuestions/:uid", async (req, res) => {
 });
 
 // Admin notify all users about new questions
+// Helper to send push notification via Expo
+async function sendPushNotification(token, title, body) {
+  try {
+    await fetch("https://exp.host/--/api/v2/push/send", {
+      method: "POST",
+      headers: {
+        "Accept": "application/json",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        to: token,
+        title,
+        body,
+        sound: "default",
+        priority: "high"
+      })
+    });
+  } catch (e) {
+    console.log("Push error:", e.message);
+  }
+}
+
 app.post("/notifyNewQuestions", async (req, res) => {
   try {
     const { count, adminKey } = req.body;
@@ -752,9 +795,13 @@ app.post("/notifyNewQuestions", async (req, res) => {
 
     const usersSnap = await getDocs(collection(db, "users"));
     let notified = 0;
+    let pushed = 0;
 
     for (const userDoc of usersSnap.docs) {
       try {
+        const userData = userDoc.data();
+
+        // Save in-app notification
         await addDoc(collection(db, "notifications"), {
           userId: userDoc.id,
           type: "newQuestions",
@@ -764,13 +811,26 @@ app.post("/notifyNewQuestions", async (req, res) => {
           createdAt: new Date()
         });
         notified++;
+
+        // Send push notification if user has token
+        if (userData.pushToken) {
+          await sendPushNotification(
+            userData.pushToken,
+            "🎉 New Questions Added!",
+            `${count} new questions available! Come play and earn coins!`
+          );
+          pushed++;
+        }
       } catch (e) { console.log(e); }
     }
 
-    // Also broadcast to all connected sockets
-    io.emit("newQuestionsAdded", { count, message: `🎉 ${count} new questions added! Play now!` });
+    // Broadcast to all connected sockets (app open users)
+    io.emit("newQuestionsAdded", {
+      count,
+      message: `🎉 ${count} new questions added! Play now!`
+    });
 
-    res.json({ success: true, notified });
+    res.json({ success: true, notified, pushed });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
