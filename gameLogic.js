@@ -1,15 +1,18 @@
 // Contest = Tournament with 10 minute timer
 class Contest {
-  constructor(contestId, roomData) {
+  constructor(contestId, roomData, isRematch = false, rematchPlayers = null) {
     this.contestId = contestId;
     this.roomData = roomData;
-    this.players = new Map(); // uid -> { socketId, name, joinedAt, status, score, questions, currentQ, answers }
+    this.players = new Map();
     this.startTime = null;
     this.endTime = null;
-    this.contestDuration = 10 * 60 * 1000; // 10 minutes
-    this.gameDuration = 200 * 1000; // 200 seconds per game (10 Q × 20s)
-    this.status = "waiting"; // waiting, active, ended
+    this.contestDuration = isRematch ? 5 * 60 * 1000 : 10 * 60 * 1000; // 5 min for rematch
+    this.gameDuration = isRematch ? 100 * 1000 : 200 * 1000; // 5 questions for rematch
+    this.status = "waiting";
     this.timer = null;
+    this.isRematch = isRematch;
+    this.rematchPlayers = rematchPlayers; // pre-defined players for rematch
+    this.totalPrizePool = 0; // accumulated prize pool from rematches
   }
 
   addPlayer(uid, socketId, playerData, questions) {
@@ -20,7 +23,7 @@ class Contest {
       socketId,
       name: playerData.name,
       joinedAt: Date.now(),
-      status: "playing", // playing, finished, left
+      status: "playing",
       score: 0,
       questions: questions,
       currentQ: 0,
@@ -33,9 +36,7 @@ class Contest {
 
   removePlayer(uid) {
     const player = this.players.get(uid);
-    if (player) {
-      player.status = "left";
-    }
+    if (player) player.status = "left";
   }
 
   getPlayer(uid) {
@@ -49,12 +50,9 @@ class Contest {
     return null;
   }
 
-  // Update socket ID if user reconnects with new socket
   updateSocketId(uid, newSocketId) {
     const player = this.players.get(uid);
-    if (player) {
-      player.socketId = newSocketId;
-    }
+    if (player) player.socketId = newSocketId;
   }
 
   recordAnswer(uid, questionIndex, answerIndex) {
@@ -64,7 +62,6 @@ class Contest {
 
     player.answers.set(questionIndex, answerIndex);
     
-    // Check if answer is correct
     const question = player.questions[questionIndex];
     if (question && answerIndex === question.correct) {
       player.score++;
@@ -72,7 +69,6 @@ class Contest {
     
     player.currentQ = questionIndex + 1;
     
-    // Mark finished if completed all questions
     if (player.currentQ >= player.questions.length) {
       player.status = "finished";
     }
@@ -102,14 +98,13 @@ class Contest {
     this.status = "ended";
   }
 
-  // Check if new players can still join
   canJoin() {
     if (this.status === "waiting") return true;
     if (this.status === "ended") return false;
+    if (this.isRematch) return false; // No new entries to rematch
     
     const now = Date.now();
     const timeLeft = this.endTime - now;
-    // Need at least 200 seconds (game duration) left to join
     return timeLeft >= this.gameDuration;
   }
 

@@ -40,24 +40,17 @@ const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
-// PRACTICE ROOM (instant game - old system)
-const practiceRooms = new Map(); // roomType -> [players]
-const practiceGames = new Map(); // gameId -> game
-
-// TOURNAMENT CONTESTS (new system for paid rooms)
-const waitingContests = new Map(); // roomType -> Contest (waiting to fill)
-const activeContests = new Map(); // contestId -> Contest
+const practiceRooms = new Map();
+const practiceGames = new Map();
+const waitingContests = new Map();
+const activeContests = new Map();
 
 // ========== HELPER: Fetch random questions ==========
 async function fetchRandomQuestions(playerUid, count = 10) {
   try {
-    // Get user's seen questions
     const seenQuestionIds = new Set();
     const userDoc = await getDocs(
-      query(
-        collection(db, "userQuestionHistory"),
-        where("userId", "==", playerUid)
-      )
+      query(collection(db, "userQuestionHistory"), where("userId", "==", playerUid))
     );
     userDoc.docs.forEach(d => {
       const data = d.data();
@@ -66,7 +59,6 @@ async function fetchRandomQuestions(playerUid, count = 10) {
       }
     });
 
-    // Fetch all easy + hard
     const easySnap = await getDocs(
       query(collection(db, "questions"), where("difficulty", "==", "easy"))
     );
@@ -77,7 +69,6 @@ async function fetchRandomQuestions(playerUid, count = 10) {
     let easyAll = easySnap.docs.map(d => ({ id: d.id, ...d.data() }));
     let hardAll = hardSnap.docs.map(d => ({ id: d.id, ...d.data() }));
 
-    // Filter unseen
     let easyUnseen = easyAll.filter(q => !seenQuestionIds.has(q.id));
     let hardUnseen = hardAll.filter(q => !seenQuestionIds.has(q.id));
 
@@ -90,7 +81,6 @@ async function fetchRandomQuestions(playerUid, count = 10) {
     const hard3 = hardUnseen.sort(() => Math.random() - 0.5).slice(0, 3);
     const selected = [...easy7, ...hard3].sort(() => Math.random() - 0.5);
 
-    // Save to user history
     try {
       const historyRef = doc(db, "userQuestionHistory", playerUid);
       const historyDoc = await getDoc(historyRef);
@@ -120,9 +110,50 @@ async function fetchRandomQuestions(playerUid, count = 10) {
   }
 }
 
-// ========== PRACTICE GAME (Old fast system) ==========
-async function fetchPracticeQuestions(playerUid) {
-  return await fetchRandomQuestions(playerUid, 10);
+// Helper: Fetch only hard questions for rematch
+async function fetchHardQuestionsOnly(playerUid, count = 5) {
+  try {
+    const seenIds = new Set();
+    const userDoc = await getDocs(
+      query(collection(db, "userQuestionHistory"), where("userId", "==", playerUid))
+    );
+    userDoc.docs.forEach(d => {
+      const data = d.data();
+      if (data.questionIds) data.questionIds.forEach(id => seenIds.add(id));
+    });
+    
+    const hardSnap = await getDocs(
+      query(collection(db, "questions"), where("difficulty", "==", "hard"))
+    );
+    let hardAll = hardSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+    let hardUnseen = hardAll.filter(q => !seenIds.has(q.id));
+    
+    if (hardUnseen.length < count) {
+      hardUnseen = hardAll;
+    }
+    
+    const selected = hardUnseen.sort(() => Math.random() - 0.5).slice(0, count);
+    
+    try {
+      const historyRef = doc(db, "userQuestionHistory", playerUid);
+      const historyDoc = await getDoc(historyRef);
+      const questionIds = selected.map(q => q.id);
+
+      if (historyDoc.exists()) {
+        await updateDoc(historyRef, {
+          questionIds: arrayUnion(...questionIds),
+          lastUpdated: new Date()
+        });
+      }
+    } catch (e) {
+      console.log("Error saving history:", e.message);
+    }
+    
+    return selected;
+  } catch (e) {
+    console.log("Error fetching hard questions:", e);
+    return [];
+  }
 }
 
 // ========== CONTEST FUNCTIONS ==========
@@ -136,7 +167,6 @@ async function startContest(contest, players) {
   console.log(`⏱ Duration: 10 minutes`);
   console.log(`👥 Players: ${players.length}`);
 
-  // Send each player their own questions
   for (const playerInfo of players) {
     const questions = await fetchRandomQuestions(playerInfo.playerData.uid);
     contest.addPlayer(playerInfo.playerData.uid, playerInfo.socketId, playerInfo.playerData, questions);
@@ -145,12 +175,11 @@ async function startContest(contest, players) {
       contestId,
       contestEndTime: contest.endTime,
       totalQuestions: questions.length,
-      gameDuration: 200, // 200 seconds for own game
+      gameDuration: 200,
       roomName: contest.roomData.name,
       entry: contest.roomData.entry
     });
 
-    // Deduct entry fee
     try {
       await updateDoc(doc(db, "users", playerInfo.playerData.uid), {
         coins: increment(-contest.roomData.entry)
@@ -161,12 +190,10 @@ async function startContest(contest, players) {
     }
   }
 
-  // Set contest end timer
   contest.timer = setTimeout(() => {
     endContest(contestId);
   }, contest.contestDuration);
 
-  // Live leaderboard broadcast every 10 sec
   contest.leaderboardInterval = setInterval(() => {
     const leaderboard = contest.getLiveLeaderboard();
     contest.players.forEach((player) => {
@@ -195,7 +222,6 @@ async function joinExistingContest(contest, socketId, playerData) {
     joinedLate: true
   });
 
-  // Deduct entry fee
   try {
     await updateDoc(doc(db, "users", playerData.uid), {
       coins: increment(-contest.roomData.entry)
@@ -218,18 +244,78 @@ async function endContest(contestId) {
   const scores = contest.getFinalScores();
   const winners = contest.findWinners();
   const totalPlayers = contest.players.size;
-  const totalPool = contest.roomData.entry * totalPlayers;
-  const prizePool = Math.floor(totalPool * 0.9);
   
-  // Split prize among tied winners
+  const baseTotalPool = contest.roomData.entry * totalPlayers;
+  const basePrizePool = Math.floor(baseTotalPool * 0.9);
+  const prizePool = contest.isRematch ? contest.totalPrizePool : basePrizePool;
+  
   const prizePerWinner = winners.length > 0 ? Math.floor(prizePool / winners.length) : 0;
   const winnerNames = winners.map(w => w.name).join(", ");
+  
+  // 🔄 REMATCH LOGIC
+  const minPrizeNeeded = contest.roomData.entry * 2;
+  const needsRematch = winners.length > 1 && prizePerWinner < minPrizeNeeded;
 
   console.log(`🏁 Contest ENDED: ${contestId}`);
-  console.log(`🏆 Winners: ${winnerNames}`);
-  console.log(`💰 Prize per winner: ${prizePerWinner}`);
+  console.log(`🏆 Winners: ${winners.length} (${winnerNames})`);
+  console.log(`💰 Prize per winner: ${prizePerWinner} (need: ${minPrizeNeeded})`);
 
-  // Send results to all players
+  if (needsRematch) {
+    console.log(`🔄 REMATCH! Prize ${prizePerWinner} < ${minPrizeNeeded}`);
+    
+    for (const [uid, player] of contest.players) {
+      if (player.status === "left") continue;
+      const isWinner = winners.find(w => w.uid === uid);
+      if (isWinner) continue;
+      
+      const rank = scores.findIndex(s => s.uid === uid) + 1;
+      
+      try {
+        await updateDoc(doc(db, "users", uid), {
+          totalGames: increment(1)
+        });
+        
+        await addDoc(collection(db, "matchHistory"), {
+          userId: uid,
+          userName: player.name,
+          roomName: contest.roomData.name,
+          roomEntry: contest.roomData.entry,
+          isWinner: false,
+          rank,
+          score: player.score,
+          totalQuestions: player.questions.length,
+          totalPlayers,
+          prize: 0,
+          winnerName: winnerNames,
+          leftEarly: false,
+          contestId,
+          playedAt: new Date()
+        });
+      } catch (e) {
+        console.log("Error saving loss:", e.message);
+      }
+      
+      io.to(player.socketId).emit("contestEnd", {
+        contestId,
+        isWinner: false,
+        rank,
+        score: player.score,
+        totalQuestions: player.questions.length,
+        prize: 0,
+        winnerName: winnerNames,
+        allScores: scores
+      });
+    }
+    
+    setTimeout(async () => {
+      await startRematch(contest, winners, prizePool);
+    }, 3000);
+    
+    activeContests.delete(contestId);
+    return;
+  }
+  
+  // Normal end
   for (const [uid, player] of contest.players) {
     if (player.status === "left") continue;
 
@@ -237,7 +323,6 @@ async function endContest(contestId) {
     const rank = scores.findIndex(s => s.uid === uid) + 1;
     const prize = isWinner ? prizePerWinner : 0;
 
-    // Update user stats and add prize
     try {
       if (isWinner) {
         await updateDoc(doc(db, "users", uid), {
@@ -251,7 +336,6 @@ async function endContest(contestId) {
         });
       }
 
-      // Save match history
       await addDoc(collection(db, "matchHistory"), {
         userId: uid,
         userName: player.name,
@@ -272,7 +356,6 @@ async function endContest(contestId) {
       console.log("Error saving results:", e.message);
     }
 
-    // Emit results
     io.to(player.socketId).emit("contestEnd", {
       contestId,
       isWinner: !!isWinner,
@@ -288,7 +371,64 @@ async function endContest(contestId) {
   activeContests.delete(contestId);
 }
 
-// ========== PRACTICE GAME (Old system) ==========
+// 🔄 REMATCH FUNCTION
+async function startRematch(oldContest, winners, prizePool) {
+  const rematchId = `rematch_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  console.log(`🔄 Starting REMATCH: ${rematchId}`);
+  console.log(`👥 Rematch players: ${winners.length}`);
+  console.log(`💰 Prize pool: ${prizePool}`);
+  
+  const rematch = new Contest(rematchId, oldContest.roomData, true, winners);
+  rematch.totalPrizePool = prizePool;
+  
+  rematch.start();
+  activeContests.set(rematchId, rematch);
+  
+  for (const winner of winners) {
+    const hardQuestions = await fetchHardQuestionsOnly(winner.uid, 5);
+    
+    if (hardQuestions.length === 0) {
+      console.log(`⚠️ No hard questions for ${winner.name}`);
+      continue;
+    }
+    
+    rematch.addPlayer(winner.uid, winner.socketId, { name: winner.name }, hardQuestions);
+    
+    const playerSocket = io.sockets.sockets.get(winner.socketId);
+    if (playerSocket) {
+      playerSocket.join(rematchId);
+    }
+    
+    io.to(winner.socketId).emit("contestStart", {
+      contestId: rematchId,
+      contestEndTime: rematch.endTime,
+      totalQuestions: hardQuestions.length,
+      gameDuration: 100,
+      roomName: oldContest.roomData.name + " 🔥 REMATCH",
+      entry: 0,
+      isRematch: true,
+      prizePool: prizePool
+    });
+  }
+  
+  rematch.timer = setTimeout(() => {
+    endContest(rematchId);
+  }, rematch.contestDuration);
+  
+  rematch.leaderboardInterval = setInterval(() => {
+    const leaderboard = rematch.getLiveLeaderboard();
+    rematch.players.forEach((player) => {
+      if (player.status !== "left") {
+        io.to(player.socketId).emit("liveLeaderboard", {
+          leaderboard,
+          timeLeft: rematch.getTimeLeft()
+        });
+      }
+    });
+  }, 5000);
+}
+
+// ========== PRACTICE GAME ==========
 async function startPracticeGame(players, roomData) {
   const gameId = `practice_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   console.log(`🎮 Starting practice: ${gameId}`);
@@ -305,7 +445,6 @@ async function startPracticeGame(players, roomData) {
     timer: null
   };
 
-  // Get questions for first player (others get same)
   const firstUid = players[0].playerData.uid;
   game.questions = await fetchRandomQuestions(firstUid);
 
@@ -439,15 +578,14 @@ function endPracticeGame(gameId) {
 }
 
 // ========== SOCKET HANDLERS ==========
-
 io.on("connection", (socket) => {
   console.log(`✅ Connected: ${socket.id}`);
 
-  // ===== PRACTICE ROOM (instant) =====
+  // PRACTICE
   socket.on("joinPractice", async (data) => {
     const { roomType, roomData, playerData } = data;
     console.log(`👤 ${playerData.name} joining PRACTICE`);
-    // Check if user has enough unseen questions
+    
     try {
       const easySnap = await getDocs(
         query(collection(db, "questions"), where("difficulty", "==", "easy"))
@@ -512,11 +650,11 @@ io.on("connection", (socket) => {
     }
   });
 
-  // ===== CONTEST (paid rooms) =====
+  // CONTEST
   socket.on("joinContest", async (data) => {
     const { roomType, roomData, playerData } = data;
     console.log(`🏁 ${playerData.name} joining CONTEST ${roomType}`);
-    // Check if user has enough unseen questions
+    
     try {
       const easySnap = await getDocs(
         query(collection(db, "questions"), where("difficulty", "==", "easy"))
@@ -549,12 +687,11 @@ io.on("connection", (socket) => {
       console.log("Error checking questions:", e);
     }
 
-    // Check if already in active contest
+    // Reconnect check
     for (const [contestId, contest] of activeContests) {
       if (contest.roomData.id === roomData.id && contest.players.has(playerData.uid)) {
         const player = contest.players.get(playerData.uid);
         if (player.status === "playing") {
-          // Reconnect
           contest.updateSocketId(playerData.uid, socket.id);
           socket.join(contestId);
           io.to(socket.id).emit("contestReconnect", {
@@ -572,7 +709,7 @@ io.on("connection", (socket) => {
       }
     }
 
-    // Check if there's a joinable active contest
+    // Find joinable contest
     let joinableContest = null;
     for (const [contestId, contest] of activeContests) {
       if (contest.roomData.id === roomData.id && contest.canJoin() && !contest.players.has(playerData.uid)) {
@@ -588,12 +725,9 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // No joinable contest - go to waiting room
+    // Waiting room
     if (!waitingContests.has(roomType)) {
-      waitingContests.set(roomType, {
-        players: [],
-        roomData
-      });
+      waitingContests.set(roomType, { players: [], roomData });
     }
 
     const waiting = waitingContests.get(roomType);
@@ -612,14 +746,12 @@ io.on("connection", (socket) => {
 
     console.log(`⏳ Waiting ${roomType}: ${waiting.players.length}/${roomData.minPlayers}`);
 
-    // Start contest if enough players
     if (waiting.players.length >= roomData.minPlayers) {
       const players = waiting.players.splice(0, roomData.maxPlayers);
       
       const contestId = `contest_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       const contest = new Contest(contestId, roomData);
       
-      // Move all players to contest room
       players.forEach(p => {
         const playerSocket = io.sockets.sockets.get(p.socketId);
         if (playerSocket) {
@@ -628,7 +760,6 @@ io.on("connection", (socket) => {
         }
       });
 
-      // Countdown then start
       let count = 5;
       const interval = setInterval(() => {
         players.forEach(p => io.to(p.socketId).emit("countdown", { count }));
@@ -644,7 +775,6 @@ io.on("connection", (socket) => {
   socket.on("leaveLobby", (data) => {
     const { roomType } = data;
     
-    // Practice
     if (practiceRooms.has(roomType)) {
       const waiting = practiceRooms.get(roomType);
       const updated = waiting.filter(p => p.socketId !== socket.id);
@@ -657,7 +787,6 @@ io.on("connection", (socket) => {
       });
     }
     
-    // Contest waiting
     if (waitingContests.has(roomType)) {
       const waiting = waitingContests.get(roomType);
       waiting.players = waiting.players.filter(p => p.socketId !== socket.id);
@@ -673,7 +802,6 @@ io.on("connection", (socket) => {
     socket.leave(`contest_waiting_${roomType}`);
   });
 
-  // ===== PRACTICE ANSWER =====
   socket.on("submitAnswer", (data) => {
     const { gameId, answerIndex } = data;
     const game = practiceGames.get(gameId);
@@ -689,7 +817,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // ===== CONTEST ANSWER =====
   socket.on("submitContestAnswer", (data) => {
     const { contestId, questionIndex, answerIndex, uid } = data;
     const contest = activeContests.get(contestId);
@@ -699,7 +826,6 @@ io.on("connection", (socket) => {
 
     const player = contest.getPlayer(uid);
     if (player && player.currentQ < player.questions.length) {
-      // Send next question
       const nextQ = player.questions[player.currentQ];
       io.to(socket.id).emit("contestNextQuestion", {
         questionIndex: player.currentQ,
@@ -711,7 +837,6 @@ io.on("connection", (socket) => {
         timeLimit: 20
       });
     } else if (player && player.status === "finished") {
-      // Send waiting for results screen data
       io.to(socket.id).emit("contestGameFinished", {
         contestId,
         yourScore: player.score,
@@ -722,7 +847,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // ===== Get first question of contest =====
   socket.on("contestRequestFirstQuestion", (data) => {
     const { contestId, uid } = data;
     const contest = activeContests.get(contestId);
@@ -745,7 +869,6 @@ io.on("connection", (socket) => {
     });
   });
 
-  // ===== Get active contests list =====
   socket.on("getActiveContests", (data) => {
     const { uid } = data;
     const userContests = [];
@@ -773,13 +896,11 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => {
     console.log(`❌ Disconnected: ${socket.id}`);
 
-    // Clean up practice rooms
     practiceRooms.forEach((players, roomType) => {
       const updated = players.filter(p => p.socketId !== socket.id);
       practiceRooms.set(roomType, updated);
     });
 
-    // Clean up practice games
     practiceGames.forEach((game, gameId) => {
       if (game.players.has(socket.id)) {
         game.players.delete(socket.id);
@@ -787,22 +908,17 @@ io.on("connection", (socket) => {
       }
     });
 
-    // Clean up contest waiting
     waitingContests.forEach((waiting, roomType) => {
       waiting.players = waiting.players.filter(p => p.socketId !== socket.id);
     });
-
-    // Note: For contests, we DON'T remove player on disconnect
-    // They can reconnect using their UID
   });
 });
 
-// ========== Check if user has enough unseen questions ==========
+// API: Check unseen questions count
 app.get("/checkQuestions/:uid", async (req, res) => {
   try {
     const { uid } = req.params;
     
-    // Get all easy + hard
     const easySnap = await getDocs(
       query(collection(db, "questions"), where("difficulty", "==", "easy"))
     );
@@ -814,7 +930,6 @@ app.get("/checkQuestions/:uid", async (req, res) => {
     const totalHard = hardSnap.size;
     const totalQuestions = totalEasy + totalHard;
     
-    // Get user's seen
     const seenQuestionIds = new Set();
     const userDoc = await getDocs(
       query(collection(db, "userQuestionHistory"), where("userId", "==", uid))
@@ -826,7 +941,6 @@ app.get("/checkQuestions/:uid", async (req, res) => {
       }
     });
     
-    // Count unseen
     let unseenEasy = 0;
     let unseenHard = 0;
     
@@ -873,5 +987,6 @@ server.listen(PORT, "0.0.0.0", () => {
 📡 Port: ${PORT}
 🏆 Tournament mode active
 🎮 Practice mode active
+🔄 Rematch logic enabled
   `);
 });
